@@ -122,6 +122,10 @@ import {
 import { SessionImportView } from '../session-import'
 import { SessionPickerOverlay } from '../session-picker-overlay'
 import { SessionSwitcher } from '../session-switcher'
+import {
+  type CompletedTurnHydrationGuards,
+  registerCompletedTurnHydrationGuard
+} from '../session/completed-turn-hydration-guard'
 import { useBackgroundQueueDrain } from '../session/hooks/use-background-queue-drain'
 import { useContextSuggestions } from '../session/hooks/use-context-suggestions'
 import { useCwdActions } from '../session/hooks/use-cwd-actions'
@@ -206,6 +210,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const cronReviewSeenRef = useRef(0)
   const activeTranscriptSignatureRef = useRef(new Map<string, string>())
   const activeTranscriptRequestSequenceRef = useRef(0)
+  const completedTurnHydrationGuardsRef = useRef<CompletedTurnHydrationGuards>(new Map())
   // Stable identity for the whole callback surface (see WiringActions). Mutated
   // in place each render so memoized surfaces never re-render on churn.
   const actionsRef = useRef<WiringActions | null>(null)
@@ -492,6 +497,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       await hydrateStoredSessionTranscript({
         attempts,
+        completedTurnHydrationGuardsRef,
         expectedFinalAssistantRowId,
         storedSessionId,
         runtimeSessionId,
@@ -509,6 +515,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       reconcileActiveTranscript({
         activeSessionIdRef,
         busyRef,
+        completedTurnHydrationGuardsRef,
         requestSequenceRef: activeTranscriptRequestSequenceRef,
         resolveSession: resolveActiveTranscriptSession,
         selectedStoredSessionIdRef,
@@ -518,10 +525,23 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     [activeSessionIdRef, busyRef, selectedStoredSessionIdRef, updateSessionState]
   )
 
+  const rememberCompletedTurn = useCallback(
+    (storedSessionId: string, runtimeSessionId: string, finalAssistantRowId: number) => {
+      registerCompletedTurnHydrationGuard(
+        completedTurnHydrationGuardsRef.current,
+        storedSessionId,
+        runtimeSessionId,
+        finalAssistantRowId
+      )
+    },
+    []
+  )
+
   const { handleGatewayEvent, handleServerRequest } = useMessageStream({
     activeGatewayProfile,
     activeSessionIdRef,
     hydrateFromStoredSession,
+    rememberCompletedTurn,
     queryClient,
     refreshHermesConfig,
     refreshSessions,
@@ -952,6 +972,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     activeIsMessaging,
     activeSessionId,
     activeStoredSessionId: selectedStoredSessionId,
+    completedTurnHydrationGuardsRef,
     freshDraftReady,
     gatewayState,
     refreshActiveTranscript,

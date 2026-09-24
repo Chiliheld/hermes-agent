@@ -9,6 +9,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ChatRuntimeBoundary } from '@/app/chat'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { mergeOlderTranscriptPage } from '@/app/chat/transcript-backfill'
+import {
+  type CompletedTurnHydrationGuards,
+  registerCompletedTurnHydrationGuard
+} from '@/app/session/completed-turn-hydration-guard'
 import { useMessageStream } from '@/app/session/hooks/use-message-stream'
 import { useSessionStateCache } from '@/app/session/hooks/use-session-state-cache'
 import { stubThreadEnvironment } from '@/components/assistant-ui/test-utils'
@@ -101,6 +105,7 @@ function Harness({
   const queryClient = useRef(new QueryClient()).current
   const requestSequenceRef = useRef(0)
   const signatureRef = useRef(new Map<string, string>())
+  const completedTurnHydrationGuardsRef = useRef<CompletedTurnHydrationGuards>(new Map())
   cache = useSessionStateCache({
     activeSessionId: tile ? 'other-runtime' : RUNTIME,
     selectedStoredSessionId: tile ? 'other-stored' : STORED,
@@ -121,6 +126,7 @@ function Harness({
       if (storedSessionId && runtimeSessionId) {
         await hydrateStoredSessionTranscript({
           attempts,
+          completedTurnHydrationGuardsRef,
           expectedFinalAssistantRowId,
           storedSessionId,
           runtimeSessionId,
@@ -132,10 +138,23 @@ function Harness({
     [updateSessionState]
   )
 
+  const rememberCompletedTurn = useCallback(
+    (storedSessionId: string, runtimeSessionId: string, finalAssistantRowId: number) => {
+      registerCompletedTurnHydrationGuard(
+        completedTurnHydrationGuardsRef.current,
+        storedSessionId,
+        runtimeSessionId,
+        finalAssistantRowId
+      )
+    },
+    []
+  )
+
   stream = useMessageStream({
     ...cache,
     queryClient,
     hydrateFromStoredSession: fallback ? hydrate : noop,
+    rememberCompletedTurn,
     refreshHermesConfig: noop,
     refreshSessions: noop
   })
@@ -143,6 +162,7 @@ function Harness({
     () =>
       tile
         ? reconcileTileTranscripts({
+            completedTurnHydrationGuardsRef,
             requestSequenceRef,
             signatureRef,
             updateSessionState,
@@ -153,6 +173,7 @@ function Harness({
             selectedStoredSessionIdRef,
             updateSessionState,
             busyRef,
+            completedTurnHydrationGuardsRef,
             requestSequenceRef,
             signatureRef,
             resolveSession: () => ({ profile: 'default' })
@@ -174,6 +195,7 @@ function Harness({
     refreshMessagingSessions: noop,
     refreshSessions: noop,
     requestGateway: async () => ({ sessions: [] }) as never,
+    completedTurnHydrationGuardsRef,
     updateSessionState: cache.updateSessionState
   })
   const busy = useStore(PRIMARY_SESSION_VIEW.$busy)
@@ -474,6 +496,44 @@ it('keeps a completion-only reply while stored history lags its persistence rece
   const texts = $sessionStates.get()[RUNTIME].messages.map(chatMessageText)
   expect(texts.filter(text => text.includes(FINAL))).toHaveLength(1)
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+
+  // The direct fallback has acknowledged row 6, but a later background read
+  // may still return an older state.db page. It shares the guard and must not
+  // erase the settled reply.
+  vi.mocked(getLatestSessionMessages).mockResolvedValueOnce({ session_id: STORED, messages: toolRound })
+  await act(async () => {
+    await refresh()
+  })
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+})
+
+it('keeps a normally streamed reply when a later background refresh is stale', async () => {
+  render(<Harness />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+
+  send('message.start')
+  send('message.delta', { text: FINAL })
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(100)
+  })
+  send('message.complete', {
+    text: FINAL,
+    persisted_turn: {
+      row_ids: [3, 4, 5, 6],
+      user_row_id: 3,
+      final_assistant_row_id: 6,
+      complete: true
+    }
+  })
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+
+  vi.mocked(getLatestSessionMessages).mockResolvedValueOnce({ session_id: STORED, messages: toolRound })
+  await act(async () => {
+    await refresh()
+  })
+
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+  expect($sessionStates.get()[RUNTIME].messages.map(chatMessageText)).toContain(FINAL)
 })
 
 it.each(['unmount', 'navigation'] as const)('retires an interrupted refresh on %s', async mode => {
