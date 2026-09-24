@@ -450,16 +450,22 @@ def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
 def _remember_absorbed_row(survivor: Dict[str, Any], dropped: Dict[str, Any]) -> None:
     """Record durable ids a merge folded into *survivor* and then dropped from the list.
 
-    The survivor keeps one ``_row_id``. Without the absorbed ids, an archive capped at
-    that id clones the folded row beside content the summary already contains.
+    No-op when the dropped dict names no row. An empty incoming turn still merges,
+    and stamping an empty list would change a message that absorbed nothing.
     """
-    absorbed = survivor.setdefault("_absorbed_row_ids", [])
+    ids = []
     row_id = dropped.get("_row_id")
-    if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0 and row_id not in absorbed:
-        absorbed.append(row_id)
+    if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
+        ids.append(row_id)
     for older in dropped.get("_absorbed_row_ids") or ():
-        if isinstance(older, int) and not isinstance(older, bool) and older > 0 and older not in absorbed:
-            absorbed.append(older)
+        if isinstance(older, int) and not isinstance(older, bool) and older > 0 and older not in ids:
+            ids.append(older)
+    if not ids:
+        return
+    absorbed = survivor.setdefault("_absorbed_row_ids", [])
+    for row_id in ids:
+        if row_id not in absorbed:
+            absorbed.append(row_id)
 
 
 def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int]:
