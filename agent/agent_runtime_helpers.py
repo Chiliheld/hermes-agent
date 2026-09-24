@@ -447,6 +447,21 @@ def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
         prev.pop(_DB_PERSISTED_MARKER, None)
 
 
+def _remember_absorbed_row(survivor: Dict[str, Any], dropped: Dict[str, Any]) -> None:
+    """Record durable ids a merge folded into *survivor* and then dropped from the list.
+
+    The survivor keeps one ``_row_id``. Without the absorbed ids, an archive capped at
+    that id clones the folded row beside content the summary already contains.
+    """
+    absorbed = survivor.setdefault("_absorbed_row_ids", [])
+    row_id = dropped.get("_row_id")
+    if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0 and row_id not in absorbed:
+        absorbed.append(row_id)
+    for older in dropped.get("_absorbed_row_ids") or ():
+        if isinstance(older, int) and not isinstance(older, bool) and older > 0 and older not in absorbed:
+            absorbed.append(older)
+
+
 def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int]:
     """Pass 0: merge consecutive assistant turns (codex interims exempt)."""
     repairs = 0
@@ -460,9 +475,11 @@ def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int
         ):
             # A provisional verification candidate is superseded, not unioned.
             if prev.get("finish_reason") in {"verification_required", "verify_hook_continue"}:
+                _remember_absorbed_row(msg, prev)
                 collapsed[-1] = msg
             else:
                 _merge_assistant_into(prev, msg)
+                _remember_absorbed_row(prev, msg)
             repairs += 1
             continue
         collapsed.append(msg)
@@ -582,6 +599,7 @@ def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
             # reproduces the persisted bytes (e.g. an empty incoming turn) keeps its stamp.
             if merged_content != prev_content or had_api_sidecar:
                 prev.pop(_DB_PERSISTED_MARKER, None)
+            _remember_absorbed_row(prev, msg)
             repairs += 1
             continue
         merged.append(msg)
