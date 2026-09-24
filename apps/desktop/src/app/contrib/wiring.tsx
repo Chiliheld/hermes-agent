@@ -479,7 +479,8 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     async (
       attempts = 1,
       storedSessionId = selectedStoredSessionIdRef.current,
-      runtimeSessionId = activeSessionIdRef.current
+      runtimeSessionId = activeSessionIdRef.current,
+      expectedFinalAssistantRowId?: number
     ) => {
       if (!storedSessionId || !runtimeSessionId) {
         return
@@ -491,6 +492,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
       await hydrateStoredSessionTranscript({
         attempts,
+        expectedFinalAssistantRowId,
         storedSessionId,
         runtimeSessionId,
         storedProfile,

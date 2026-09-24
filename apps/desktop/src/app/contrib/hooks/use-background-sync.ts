@@ -304,12 +304,14 @@ export async function reconcileTileTranscripts({
 /** Best-effort post-turn fallback when the live stream did not carry an answer. */
 export async function hydrateStoredSessionTranscript({
   attempts,
+  expectedFinalAssistantRowId,
   storedSessionId,
   runtimeSessionId,
   storedProfile,
   updateSessionState
 }: {
   attempts: number
+  expectedFinalAssistantRowId?: number
   storedSessionId: string
   runtimeSessionId: string
   storedProfile: ProfileScope
@@ -353,6 +355,20 @@ export async function hydrateStoredSessionTranscript({
       // A zero-row page over the populated turn is a transient read, not the
       // answer.
       if (emptyPageOverPopulatedTranscript(latest.messages, $sessionStates.get()[runtimeSessionId], storedSessionId)) {
+        continue
+      }
+
+      // message.complete can arrive before the same committed row is visible
+      // through the transcript reader. Publishing that older non-empty page
+      // would erase the completed reply the gateway just rendered (#79050).
+      // The terminal persistence receipt is authoritative identity; wait until
+      // the page contains its exact final row instead of comparing prose.
+      if (
+        expectedFinalAssistantRowId !== undefined &&
+        !latest.messages.some(
+          message => message.id === expectedFinalAssistantRowId || message.row_id === expectedFinalAssistantRowId
+        )
+      ) {
         continue
       }
 

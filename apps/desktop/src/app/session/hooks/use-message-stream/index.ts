@@ -47,7 +47,8 @@ interface MessageStreamOptions {
   hydrateFromStoredSession: (
     attempts?: number,
     storedSessionId?: string | null,
-    runtimeSessionId?: string | null
+    runtimeSessionId?: string | null,
+    expectedFinalAssistantRowId?: number
   ) => Promise<void>
   queryClient: QueryClient
   refreshHermesConfig: () => Promise<void>
@@ -936,7 +937,13 @@ export function useMessageStream({
       }
 
       if (shouldHydrate) {
-        void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId)
+        const finalRowId = persistedTurn?.complete === true ? persistedTurn.final_assistant_row_id : undefined
+
+        if (typeof finalRowId === 'number' && Number.isSafeInteger(finalRowId) && finalRowId > 0) {
+          void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId, finalRowId)
+        } else {
+          void hydrateFromStoredSession(3, completedState.storedSessionId, sessionId)
+        }
       }
 
       dispatchNativeNotification({

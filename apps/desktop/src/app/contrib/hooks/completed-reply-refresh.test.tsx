@@ -112,10 +112,16 @@ function Harness({
   const { activeSessionIdRef, selectedStoredSessionIdRef, updateSessionState } = cache
 
   const hydrate = useCallback(
-    async (attempts = 1, storedSessionId: string | null = STORED, runtimeSessionId: string | null = RUNTIME) => {
+    async (
+      attempts = 1,
+      storedSessionId: string | null = STORED,
+      runtimeSessionId: string | null = RUNTIME,
+      expectedFinalAssistantRowId?: number
+    ) => {
       if (storedSessionId && runtimeSessionId) {
         await hydrateStoredSessionTranscript({
           attempts,
+          expectedFinalAssistantRowId,
           storedSessionId,
           runtimeSessionId,
           storedProfile: 'default',
@@ -433,6 +439,40 @@ it('still hydrates a missing completion after a transient read failure', async (
     await vi.advanceTimersByTimeAsync(300)
   })
   expect(getLatestSessionMessages).toHaveBeenCalledTimes(2)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+})
+
+it('keeps a completion-only reply while stored history lags its persistence receipt', async () => {
+  render(<Harness fallback />)
+  act(() => cache.updateSessionState(RUNTIME, state => ({ ...state, messages: toChatMessages(history) }), STORED))
+  vi.mocked(getLatestSessionMessages)
+    .mockResolvedValueOnce({ session_id: STORED, messages: toolRound })
+    .mockResolvedValueOnce({ session_id: STORED, messages: completeHistory })
+
+  send('message.start')
+  send('message.complete', {
+    text: FINAL,
+    persisted_turn: {
+      row_ids: [3, 4, 5, 6],
+      user_row_id: 3,
+      final_assistant_row_id: 6,
+      complete: true
+    }
+  })
+  await act(async () => {
+    await Promise.resolve()
+  })
+
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(1)
+  expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
+
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(250)
+  })
+
+  expect(getLatestSessionMessages).toHaveBeenCalledTimes(2)
+  const texts = $sessionStates.get()[RUNTIME].messages.map(chatMessageText)
+  expect(texts.filter(text => text.includes(FINAL))).toHaveLength(1)
   expect(screen.getByTestId('runtime').textContent).toContain(FINAL)
 })
 
