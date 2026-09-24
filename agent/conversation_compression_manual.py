@@ -129,8 +129,9 @@ def compress_now(
         finalize_context_engine_compression_notification(agent, committed=False)
         return CompressResult("lock_skipped", before, before, before_tokens, before_tokens, request,
                               lock_holder=lock_signal if isinstance(lock_signal, str) else None)
-    # Stamped copies mean the in-place commit stored the tail and already returned head + tail. Rotation, a
-    # no-op or a rolled-back commit leave them unstamped, and the tail is then only in the caller's dicts.
+    # The held-row-id path marks the exact rows the snapshot names. The compacted response is written as new
+    # rows, so the original rows that a summary covers are archived (compacted=1) and only carried rows are
+    # rewound. The old watermark path keeps its carry-specific tail handling below.
     if tail and not all(row.get(_DB_PERSISTED_MARKER) is True for row in tail_rows):
         compressed = rejoin_compressed_head_and_tail(compressed, tail)
     after_tokens = estimate_request_tokens(agent, compressed)

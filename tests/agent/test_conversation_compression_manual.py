@@ -240,23 +240,23 @@ def test_in_place_compress_keeps_turns_the_caller_never_held(session_db, raw):
     assert session_db.search_messages("vault 7741")
 
 
-@pytest.mark.parametrize("stale", ["compacted elsewhere", "newest rows without ids", "trailing row without any stamp"])
+@pytest.mark.parametrize("stale", ["compacted elsewhere", "newest rows without ids", "trailing model-switch marker"])
 def test_in_place_compress_never_leaves_two_live_copies_of_a_row(session_db, stale):
     """Stopping the archive at the caller's newest row is only exact while the held history is a live prefix of the
-    session. After another surface compacted it, every live row is newer than the held (now archived) ones; a
-    durable row held without its row id may sit above the stop; and a trailing row held with neither a row id nor
-    the persisted marker can still be durable under the lease watermark (the TUI model-switch marker is appended
-    to history and written with a bare ``append_message``). Either way the rows above the stop would be cloned
-    beside their own copies in the new transcript."""
+    session. After another surface compacted it, every live row is newer than the held (now archived) ones (the
+    id-based commit refuses outright, #121734); a durable row held without its row id may sit above the stop; and
+    the TUI model-switch marker is a durable row appended to history by its producer, which must stamp it (row id
+    and persist marker) or the commit cannot tell it from an unpersisted turn and clones it back beside its own
+    copy. Either way the rows above the stop would be cloned beside their own copies in the new transcript."""
     agent, _ = _stored_agent(session_db, _exchanges(10))
     held = session_db.get_resume_conversations("sid")[0]
     if stale == "compacted elsewhere":
         other, _ = _stored_agent(session_db, [], create=False)
         assert _compress(other, session_db.get_messages_as_conversation("sid"), "").status == "compressed"
-    elif stale == "trailing row without any stamp":
-        marker = "[Model switched to test/other.]"
-        held.append({"role": "user", "content": marker, "display_kind": "model_switch"})
-        session_db.append_message("sid", "user", marker, display_kind="model_switch")
+    elif stale == "trailing model-switch marker":
+        from tui_gateway.server import _append_model_switch_marker
+        _append_model_switch_marker({"session_key": "sid", "history": held, "agent": agent}, model="test/other", provider="")
+        assert held[-1]["display_kind"] == "model_switch" and isinstance(held[-1].get("_row_id"), int)
     else:
         for message in held[-2:]:
             message.pop("_row_id")

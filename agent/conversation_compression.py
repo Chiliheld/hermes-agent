@@ -3612,6 +3612,44 @@ def _held_watermark(agent: Any, watermark: Optional[int], messages: list, verbat
     return held_archive_watermark(agent._session_db, agent.session_id, watermark, messages, verbatim_tail)
 
 
+def held_row_ids(messages: Optional[list], verbatim_tail: Optional[list] = None) -> Optional[set]:
+    """The ids of every durable row the compressor was handed, or ``None`` when the held history cannot name
+    them all and the commit must fall back to the positional watermark (:func:`held_archive_watermark`).
+
+    Read from the pre-dispatch snapshot (``messages_before_compression``), never from the list the engine
+    returned: a ``ContextEngine`` may rewrite the list in place (reuse a loaded dict as its summary, truncate
+    the rest), and the boundary is what the compressor SAW, not what it produced. A dict names its rows
+    through ``_row_id`` and the merge coverage in ``_row_ids`` (``message_row_ids``); the marker does not
+    matter here, a rewritten dict's ids still name the rows whose content the summary covered. A dict with
+    neither id and no persist marker is this turn's unpersisted row (no durable row to archive; the commit
+    inserts it with the compacted set). A dict with the persist marker but no id is a durable row loaded
+    without ids (the messaging gateway's ``load_transcript`` replay, the CLI's marker-only restore): the
+    exact set is unknowable, so ``None``. A ``here N`` tail copy is marker-swept, so one without an id is
+    treated the same way.
+    """
+    if not messages:
+        return None
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+    from agent.message_metadata import message_row_ids
+
+    ids: set = set()
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        own = message_row_ids(m)
+        if not own and m.get(_DB_PERSISTED_MARKER):
+            return None
+        ids.update(own)
+    for m in verbatim_tail or ():
+        if not isinstance(m, dict):
+            continue
+        own = message_row_ids(m)
+        if not own:
+            return None
+        ids.update(own)
+    return ids or None
+
+
 def held_archive_watermark(
     session_db: Any, session_id: str, watermark: Optional[int], messages: list, verbatim_tail: Optional[list] = None,
     *, stale_raises: bool = False,
@@ -3645,12 +3683,14 @@ def held_archive_watermark(
     if watermark is None:
         return None
     from agent.context_compressor import _DB_PERSISTED_MARKER, StaleHeldHistory
+    from agent.message_metadata import message_row_ids
 
     def _exact_id(m: dict, copied: bool) -> Optional[int]:
-        rid = m.get("_row_id")
-        if not isinstance(rid, int) or isinstance(rid, bool) or rid <= 0:
+        own = message_row_ids(m)
+        if not own:
             return None
-        return rid if copied or m.get(_DB_PERSISTED_MARKER) else None
+        # Merge coverage (``_row_ids``) names every row the dict absorbed, so its ids are exact without the marker.
+        return max(own) if copied or m.get(_DB_PERSISTED_MARKER) or "_row_ids" in m else None
 
     ids = [_exact_id(m, False) for m in messages if isinstance(m, dict)]
     ids += [_exact_id(m, True) for m in (verbatim_tail or ()) if isinstance(m, dict)]
@@ -3712,31 +3752,44 @@ def _commit_compaction(
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
                 tail_count = sum(1 for m in compressed if id(m) in _tail_tagged_ids)
-                # The rewind takes the newest `tail_count` durable rows as the tail's originals, so a tail row
-                # with none (this turn's user row, which the CLI and gateway persist after preflight; unflushed
-                # scaffolding) would flag a summarized row superseded instead: gone from display and search.
-                # Only while a turn holds the session: between turns (manual /compress, gateway hygiene) the
-                # anchor is the last turn's, and the rows it points at are durable, just unmarked.
-                _turn_idx = getattr(agent, "_persist_user_message_idx", None)
-                if (getattr(agent, "_active_session_turn_lease_holder", None) is not None
-                        and isinstance(_turn_idx, int) and 0 <= _turn_idx < len(messages)):
-                    from agent.context_compressor import _DB_PERSISTED_MARKER
-                    tail_count -= sum(
-                        1 for m in messages[max(_turn_idx, len(messages) - tail_count):]
-                        if isinstance(m, dict) and not m.get(_DB_PERSISTED_MARKER)
-                        and not isinstance(m.get("_row_id"), int))
+                # Archive by exact held row id when the pre-dispatch snapshot names every durable row the
+                # compressor saw (#121734); the positional watermark cap (#121302) is the fallback for a held
+                # history that carries durable rows without ids (the messaging gateway's replay).
+                held = held_row_ids(messages_before_compression, verbatim_tail)
+                # ``held_row_ids`` returning an empty set is an exact snapshot too: only current-turn rows were
+                # held, so archive no existing rows. ``None`` alone selects the gateway replay watermark.
+                use_held_ids = held is not None
+                watermark = lease.watermark
+                if not use_held_ids:
+                    watermark = _held_watermark(agent, lease.watermark, messages, verbatim_tail)
+                    # The rewind takes the newest `tail_count` durable rows as the tail's originals, so a tail
+                    # row with none (this turn's user row, which the CLI and gateway persist after preflight;
+                    # unflushed scaffolding) would flag a summarized row superseded instead: gone from display
+                    # and search. Only while a turn holds the session: between turns (manual /compress,
+                    # gateway hygiene) the anchor is the last turn's, and the rows it points at are durable,
+                    # just unmarked. The id path needs none of this: a tail copy without an id has no original.
+                    _turn_idx = getattr(agent, "_persist_user_message_idx", None)
+                    if (getattr(agent, "_active_session_turn_lease_holder", None) is not None
+                            and isinstance(_turn_idx, int) and 0 <= _turn_idx < len(messages)):
+                        from agent.context_compressor import _DB_PERSISTED_MARKER
+                        tail_count -= sum(
+                            1 for m in messages[max(_turn_idx, len(messages) - tail_count):]
+                            if isinstance(m, dict) and not m.get(_DB_PERSISTED_MARKER)
+                            and not isinstance(m.get("_row_id"), int))
+                elif tail_count:
+                    # The exact-id branch gets carried-row provenance from the compacted dicts; it must not also
+                    # use a positional tail count, which would rewind an unrelated held row.
+                    tail_count = 0
                 persisted = compressed
                 if verbatim_tail:
-                    # The kept exchanges are durable rows under the watermark, so the archive below covers
-                    # them too. Store them after the head in the same transaction, with the seam the caller
-                    # would build, and count their originals as carried duplicates like compress()'s tail.
                     from hermes_cli.partial_compress import rejoin_compressed_head_and_tail
                     persisted = rejoin_compressed_head_and_tail(compressed, verbatim_tail)
-                    tail_count += len(verbatim_tail)
+                    if not use_held_ids:
+                        tail_count += len(verbatim_tail)
                 agent._session_db.archive_and_compact(
                     agent.session_id, persisted, model_config_patch={PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY: None},
-                    watermark=_held_watermark(agent, lease.watermark, messages, verbatim_tail),
-                    lock_holder=lease.holder, tail_count=tail_count, carried_messages=carried_messages,
+                    watermark=watermark, lock_holder=lease.holder, tail_count=tail_count,
+                    carried_messages=carried_messages, held_row_ids=held,
                 )
                 compressed = persisted
                 split_status = "in_place_committed"
@@ -3814,11 +3867,22 @@ def _commit_compaction(
             split_status = "aborted" if old_session_id is None and not in_place else "failed_not_indexed"
             # If rotation rolled back to the parent, agent.session_id is the indexed parent
             # and old_session_id was cleared: recovery, not an un-indexed orphan.
+            from hermes_state_errors import StaleHeldRowsError
             if old_session_id is None and not in_place:
                 logger.warning(
                     "Compression rotation aborted and rolled back to the parent session (%s): %s",
                     agent.session_id or "?", e,
                 )
+            elif in_place and isinstance(e, StaleHeldRowsError):
+                # A refusal, not a storage failure: the held history is not the session's live generation
+                # (another surface compacted or rewound it). The transcript is unchanged; the surface's
+                # next load picks up the current rows.
+                logger.warning("In-place compaction refused for session %s: %s", agent.session_id or "?", e)
+                with _swallow("could not surface the refused compaction", exc_info=True):
+                    agent._emit_warning(
+                        f"⚠ Compression refused: {e}. No messages were dropped — the conversation continues "
+                        "unchanged; reload the session to pick up the current history before compressing again."
+                    )
             else:
                 logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
             # Arm the failure cooldown so the next turn can't rerun the doomed compression;

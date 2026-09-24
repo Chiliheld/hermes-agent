@@ -172,6 +172,23 @@ class SessionTurnLeaseLostError(RuntimeError):
     be persisting a newer turn, and landing this one would interleave a stale reply."""
 
 
+class StaleHeldRowsError(RuntimeError):
+    """An in-place compaction named held rows (``archive_and_compact(held_row_ids=...)``) that are no longer
+    active: another compaction or a rewind already replaced the history the compressor summarized. Committing
+    would archive the winner's rows and clone them back beside a second summary, so the commit is refused and
+    the caller keeps its transcript unchanged. Not a ``CompressionSessionBusyError``: waiting cannot make the
+    rows active again, so ``_execute_write`` must not retry it."""
+
+    def __init__(self, session_id: str, row_ids):
+        self.session_id = session_id
+        self.row_ids = sorted(row_ids)
+        shown = ", ".join(str(rid) for rid in self.row_ids[:8]) + (", ..." if len(self.row_ids) > 8 else "")
+        super().__init__(
+            f"{len(self.row_ids)} held row(s) of session {session_id!r} are no longer active ({shown}); "
+            "the history was compacted or rewound elsewhere, refusing to commit a stale compaction"
+        )
+
+
 class StateDbReplacedError(RuntimeError):
     """The state.db path no longer names the file this SessionDB opened
     (out-of-band cp/mv/restore). In-place FTS repair and fail-open trigger

@@ -1713,7 +1713,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         "metadata when answering questions about what model/provider is active.]")
     # A user message, not system: strict OpenAI-compatible providers (vLLM, Qwen) reject non-leading system messages.
     # See #48338.
-    entry = {"role": "user", "content": marker, "display_kind": "model_switch"}
+    entry: dict[str, Any] = {"role": "user", "content": marker, "display_kind": "model_switch"}
     with session.get("history_lock") or contextlib.nullcontext():
         history = session.setdefault("history", [])
         history[:] = [h for h in history if not _is_model_switch_marker(h)]
@@ -1726,7 +1726,13 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
             _ensure_session_db_row(session)
         with (contextlib.nullcontext(db) if db is not None else _session_db(session)) as db:
             if db is not None:
-                db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
+                row_id = db.append_message(session_id=session_key, role="user", content=marker, display_kind="model_switch")
+                # Stamp the live dict like a flushed row: the in-place compaction commit archives by the row ids
+                # the history names, and an unstamped durable row would be cloned back beside its own copy.
+                if isinstance(row_id, int) and not isinstance(row_id, bool) and row_id > 0:
+                    from agent.context_compressor import _DB_PERSISTED_MARKER
+                    entry["_row_id"] = row_id
+                    entry[_DB_PERSISTED_MARKER] = True
     except Exception:
         logger.debug("failed to persist model switch marker", exc_info=True)
 

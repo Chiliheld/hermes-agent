@@ -93,6 +93,38 @@ class TestModelSwitchMarkerDedup:
         assert session["history_version"] == 2  # one increment per switch
 
 
+class TestModelSwitchMarkerIsStampedLikeAFlushedRow:
+    """#121734: the marker is a durable row the surface holds, so its live dict must name its row id and carry
+    the persist marker. The in-place compaction commit archives by the ids the held history names; an unstamped
+    durable row looks like an unpersisted turn and would be cloned back beside its own copy."""
+
+    def test_entry_names_its_durable_row(self, tmp_path) -> None:
+        from agent.context_compressor import _DB_PERSISTED_MARKER
+        from hermes_state import SessionDB
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session("s", "tui", model="m")
+            agent = type("Agent", (), {"_session_db": db})()
+            session: dict = {"session_key": "s", "history": [], "agent": agent}
+            _append_model_switch_marker(session, model="model-a", provider="p")
+            entry = session["history"][-1]
+            rows = db.get_messages_as_conversation("s", include_row_ids=True)
+            assert len(rows) == 1 and rows[0]["display_kind"] == "model_switch"
+            assert entry["_row_id"] == rows[0]["_row_id"] and entry[_DB_PERSISTED_MARKER] is True
+        finally:
+            db.close()
+
+    def test_entry_stays_unstamped_when_the_write_failed(self) -> None:
+        class _Db:
+            def append_message(self, **_kwargs):
+                raise RuntimeError("disk full")
+
+        session: dict = {"session_key": "s", "history": [], "agent": type("Agent", (), {"_session_db": _Db()})()}
+        _append_model_switch_marker(session, model="model-a", provider="p")
+        assert "_row_id" not in session["history"][-1]
+
+
 def _make_marker_entry(model: str) -> dict:
     from tui_gateway.server import _MODEL_SWITCH_MARKER_PREFIX
 

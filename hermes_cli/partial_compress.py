@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from agent.message_metadata import record_merge_coverage
+
 #: Recent exchanges preserved verbatim when ``/compress here`` has no explicit count.
 DEFAULT_KEEP_LAST = 2
 
@@ -181,6 +183,8 @@ def rejoin_compressed_head_and_tail(
         first_content = first.get("content")
         if isinstance(last_content, str) and isinstance(first_content, str):
             head[-1] = {**last, "content": f"{last_content}\n\n{first_content}"}
+            # The folded dict stands for both rows: the in-place commit rewinds the tail's original by id.
+            record_merge_coverage(head[-1], first)
             rest = rest[1:]
         else:
             head.append({"role": "assistant" if first_role == "user" else "user", "content": ""})
