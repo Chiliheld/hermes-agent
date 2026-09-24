@@ -49,16 +49,20 @@ describe('mergePluginPackages', () => {
     expect(rows[0]).toMatchObject({ kind: 'both', desktop: null, desktopMissing: true })
   })
 
-  // Catalog install can land the desktop half at desktop-plugins/<name>/plugin.js
-  // with no .hermes-package.json. That copy is already loaded; the agent row
-  // must not stay on "copying…" as a second row.
-  it('pairs a marker-less app-root desktop copy with the agent package of the same folder name', () => {
+  // A catalog install used to land the desktop half at
+  // desktop-plugins/<name>/plugin.js with no .hermes-package.json, and the row
+  // sat on "copying…" beside a second, already-enabled desktop row. The join is
+  // the marker, not the folder name: Electron stamps it on install and adopts
+  // marker-less copies on reconcile (see desktop-plugins-root.ts), so the page
+  // pairs on evidence instead of guessing from a path.
+  it('pairs a desktop half with its agent row through the package marker', () => {
     const rows = mergePluginPackages(
       [
         desktop({
           id: 'hermes-talk',
           name: 'Hermes Talk',
           description: 'GPT-Live subscription or explicit API voice, with Hermes task delegation.',
+          packageName: 'hermes-talk',
           file: '/Users/me/.hermes/desktop-plugins/hermes-talk/plugin.js'
         })
       ],
@@ -75,6 +79,24 @@ describe('mergePluginPackages', () => {
     })
     expect(rows[0].desktop?.id).toBe('hermes-talk')
     expect(rows[0].agent?.name).toBe('hermes-talk')
+  })
+
+  it('keeps an unmarked app-root copy its own row rather than guessing from the folder name', () => {
+    const rows = mergePluginPackages(
+      [
+        desktop({
+          id: 'hermes-talk',
+          name: 'Hermes Talk',
+          file: '/Users/me/.hermes/desktop-plugins/hermes-talk/plugin.js'
+        })
+      ],
+      [agent({ name: 'hermes-talk', has_desktop_half: true })]
+    )
+
+    expect(rows.map(row => [row.key, row.kind])).toEqual([
+      ['hermes-talk', 'both'],
+      ['desktop:hermes-talk', 'desktop']
+    ])
   })
 
   it('leaves a same-named standalone desktop plugin alone when the agent package has no desktop half', () => {
